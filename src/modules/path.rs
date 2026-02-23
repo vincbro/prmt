@@ -55,38 +55,45 @@ fn normalize_relative_short_path(current_dir: &Path) -> String {
         .canonicalize()
         .unwrap_or_else(|_| current_dir.to_path_buf());
 
-    if let Some(home) = dirs::home_dir() {
+    let mut result = String::with_capacity(current_canon.as_os_str().len() + 2);
+
+    let path = if let Some(home) = dirs::home_dir() {
         let home_canon = home.canonicalize().unwrap_or(home);
         if let Ok(stripped) = current_canon.strip_prefix(&home_canon) {
             if stripped.as_os_str().is_empty() {
                 return "~".to_string();
             }
-
-            let mut result = String::with_capacity(stripped.as_os_str().len() + 2);
             result.push('~');
             result.push(std::path::MAIN_SEPARATOR);
+            stripped
+        } else {
+            current_canon.as_path()
+        }
+    } else {
+        current_canon.as_path()
+    };
 
-            let components = stripped.components();
-            let count = components.clone().count();
-
-            for (i, component) in components.enumerate() {
-                if count > 0 && i < count - 1 {
-                    if let Some(name) = component.as_os_str().to_str() {
-                        result.push(name.chars().next().unwrap_or('?'));
-                    } else {
-                        result.push('?');
-                    }
-                    result.push(std::path::MAIN_SEPARATOR);
-                } else if let Some(name) = component.as_os_str().to_str() {
-                    result.push_str(name);
+    let components = path.components();
+    let count = components.clone().count();
+    for (i, component) in components.enumerate() {
+        if count > 0 && i < count - 1 {
+            if let Some(name) = component.as_os_str().to_str() {
+                let char = name.chars().next().unwrap_or('?');
+                if char != std::path::MAIN_SEPARATOR {
+                    result.push(char);
                 }
+                result.push(std::path::MAIN_SEPARATOR);
+            } else {
+                result.push('?');
+                result.push(std::path::MAIN_SEPARATOR);
             }
-            return normalize_separators(result);
+        } else if let Some(name) = component.as_os_str().to_str() {
+            result.push_str(name);
         }
     }
-
-    normalize_separators(current_dir.to_string_lossy().to_string())
+    normalize_separators(result)
 }
+
 impl Module for PathModule {
     fn render(&self, format: &str, _context: &ModuleContext) -> Result<Option<String>> {
         let current_dir = match env::current_dir() {
