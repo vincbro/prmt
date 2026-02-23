@@ -55,7 +55,9 @@ fn normalize_relative_short_path(current_dir: &Path) -> String {
         .canonicalize()
         .unwrap_or_else(|_| current_dir.to_path_buf());
 
-    let mut result = String::with_capacity(current_canon.as_os_str().len() + 2);
+    // Pre-allocate capacity to avoid reallocations.
+    //The result will always be shorter than the original path, plus 1 byte to handle the rare edge case where a root home directory (/) expands to (~/)
+    let mut result = String::with_capacity(current_canon.as_os_str().len() + 1);
 
     let path = if let Some(home) = dirs::home_dir() {
         let home_canon = home.canonicalize().unwrap_or(home);
