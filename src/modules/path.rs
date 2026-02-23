@@ -1,5 +1,6 @@
 use crate::error::{PromptError, Result};
 use crate::module_trait::{Module, ModuleContext};
+use rayon::str::ParallelString;
 use std::env;
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -50,6 +51,37 @@ fn normalize_relative_path(current_dir: &Path) -> String {
     normalize_separators(current_dir.to_string_lossy().to_string())
 }
 
+fn normalize_relative_short_path(current_dir: &Path) -> String {
+    let current_canon = current_dir
+        .canonicalize()
+        .unwrap_or_else(|_| current_dir.to_path_buf());
+
+    if let Some(home) = dirs::home_dir() {
+        let home_canon = home.canonicalize().unwrap_or(home);
+        if let Ok(stripped) = current_canon.strip_prefix(&home_canon) {
+            if stripped.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+
+            let path = stripped.to_string_lossy();
+            let names: Vec<_> = path.split(std::path::MAIN_SEPARATOR).collect();
+            let mut result = String::from("~");
+            result.push(std::path::MAIN_SEPARATOR);
+            let len = names.len();
+            names.into_iter().enumerate().for_each(|(i, name)| {
+                if len > 0 && i < len - 1 {
+                    result.push(name.chars().next().unwrap_or('?'));
+                    result.push(std::path::MAIN_SEPARATOR);
+                } else {
+                    result.push_str(name);
+                }
+            });
+            return normalize_separators(result);
+        }
+    }
+
+    normalize_separators(current_dir.to_string_lossy().to_string())
+}
 impl Module for PathModule {
     fn render(&self, format: &str, _context: &ModuleContext) -> Result<Option<String>> {
         let current_dir = match env::current_dir() {
@@ -60,6 +92,7 @@ impl Module for PathModule {
         match format {
             "" | "relative" | "r" => Ok(Some(normalize_relative_path(&current_dir))),
             "absolute" | "a" | "f" => Ok(Some(current_dir.to_string_lossy().to_string())),
+            "rs" => Ok(Some(normalize_relative_short_path(&current_dir))),
             "short" | "s" => Ok(current_dir
                 .file_name()
                 .and_then(|n| n.to_str())
