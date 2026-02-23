@@ -1,6 +1,5 @@
 use crate::error::{PromptError, Result};
 use crate::module_trait::{Module, ModuleContext};
-use rayon::str::ParallelString;
 use std::env;
 use std::path::Path;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -63,19 +62,25 @@ fn normalize_relative_short_path(current_dir: &Path) -> String {
                 return "~".to_string();
             }
 
-            let path = stripped.to_string_lossy();
-            let names: Vec<_> = path.split(std::path::MAIN_SEPARATOR).collect();
-            let mut result = String::from("~");
+            let mut result = String::with_capacity(stripped.as_os_str().len() + 2);
+            result.push('~');
             result.push(std::path::MAIN_SEPARATOR);
-            let len = names.len();
-            names.into_iter().enumerate().for_each(|(i, name)| {
-                if len > 0 && i < len - 1 {
-                    result.push(name.chars().next().unwrap_or('?'));
+
+            let components = stripped.components();
+            let count = components.clone().count();
+
+            for (i, component) in components.enumerate() {
+                if count > 0 && i < count - 1 {
+                    if let Some(name) = component.as_os_str().to_str() {
+                        result.push(name.chars().next().unwrap_or('?'));
+                    } else {
+                        result.push('?');
+                    }
                     result.push(std::path::MAIN_SEPARATOR);
-                } else {
+                } else if let Some(name) = component.as_os_str().to_str() {
                     result.push_str(name);
                 }
-            });
+            }
             return normalize_separators(result);
         }
     }
