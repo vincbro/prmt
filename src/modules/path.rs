@@ -82,7 +82,7 @@ fn normalize_relative_short_path(current_dir: &Path) -> String {
             if let Some(name) = component.as_os_str().to_str() {
                 let char = name.chars().next().unwrap_or('?');
                 if char != std::path::MAIN_SEPARATOR {
-                    result.push(char);
+                    result.push(char.to_ascii_lowercase());
                 }
                 result.push(std::path::MAIN_SEPARATOR);
             } else {
@@ -90,7 +90,9 @@ fn normalize_relative_short_path(current_dir: &Path) -> String {
                 result.push(std::path::MAIN_SEPARATOR);
             }
         } else if let Some(name) = component.as_os_str().to_str() {
-            result.push_str(name);
+            name.chars()
+                .map(|c| c.to_ascii_lowercase())
+                .for_each(|c| result.push(c));
         }
     }
     normalize_separators(result)
