@@ -1,8 +1,10 @@
 use std::env;
 #[cfg(target_os = "linux")]
 use std::fs;
+use std::io::Read;
 use std::process::ExitCode;
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Instant;
 
 mod detector;
@@ -30,6 +32,7 @@ OPTIONS:
     -n, --no-version        Skip version detection for speed
     -d, --debug             Show debug information and timing
     -b, --bench             Run benchmark (100 iterations)
+        --stdin             Read JSON from stdin (enables json module)
         --code <CODE>       Exit code of the last command (for ok/fail modules)
         --no-color          Disable colored output
         --shell <SHELL>     Wrap ANSI escapes for the specified shell (bash, zsh, none)
@@ -42,23 +45,33 @@ struct Cli {
     no_version: bool,
     debug: bool,
     bench: bool,
+    stdin: bool,
     code: Option<i32>,
     no_color: bool,
     shell: Option<style::Shell>,
 }
 
 fn parse_args() -> Result<Cli, lexopt::Error> {
+    parse_args_from(std::env::args_os())
+}
+
+fn parse_args_from<I, T>(args: I) -> Result<Cli, lexopt::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString>,
+{
     use lexopt::prelude::*;
 
     let mut format = None;
     let mut no_version = false;
     let mut debug = false;
     let mut bench = false;
+    let mut stdin = false;
     let mut code = None;
     let mut no_color = false;
     let mut shell = None;
 
-    let mut parser = lexopt::Parser::from_env();
+    let mut parser = lexopt::Parser::from_iter(args);
     while let Some(arg) = parser.next()? {
         match arg {
             Short('h') | Long("help") => {
@@ -81,6 +94,9 @@ fn parse_args() -> Result<Cli, lexopt::Error> {
             Short('b') | Long("bench") => {
                 bench = true;
             }
+            Long("stdin") => {
+                stdin = true;
+            }
             Long("code") => {
                 code = Some(parser.value()?.parse()?);
             }
@@ -91,9 +107,12 @@ fn parse_args() -> Result<Cli, lexopt::Error> {
                 let value = parser.value()?.string()?;
                 shell = Some(style::Shell::from_str(&value)?);
             }
-            Value(val) => {
+            arg if matches!(&arg, Value(_)) => {
+                let Value(val) = arg else { unreachable!() };
                 if format.is_none() {
                     format = Some(val.string()?);
+                } else {
+                    return Err(Value(val).unexpected());
                 }
             }
             _ => return Err(arg.unexpected()),
@@ -105,6 +124,7 @@ fn parse_args() -> Result<Cli, lexopt::Error> {
         no_version,
         debug,
         bench,
+        stdin,
         code,
         no_color,
         shell,
@@ -164,15 +184,27 @@ fn detect_shell_from_parent_process() -> Option<style::Shell> {
 }
 
 fn resolve_shell(cli_shell: Option<style::Shell>) -> style::Shell {
+    resolve_shell_from_sources(
+        cli_shell,
+        detect_shell_from_parent_process(),
+        detect_shell_from_env(),
+    )
+}
+
+fn resolve_shell_from_sources(
+    cli_shell: Option<style::Shell>,
+    parent_shell: Option<style::Shell>,
+    env_shell: Option<style::Shell>,
+) -> style::Shell {
     if let Some(shell) = cli_shell {
         return shell;
     }
 
-    if let Some(shell) = detect_shell_from_env() {
+    if let Some(shell) = parent_shell {
         return shell;
     }
 
-    detect_shell_from_parent_process().unwrap_or(style::Shell::None)
+    env_shell.unwrap_or(style::Shell::None)
 }
 
 fn main() -> ExitCode {
@@ -192,8 +224,17 @@ fn main() -> ExitCode {
 
     let shell = resolve_shell(cli.shell);
 
+    let stdin_data = if cli.stdin { read_stdin_json() } else { None };
+
     let result = if cli.bench {
-        handle_bench(&format, cli.no_version, cli.code, cli.no_color, shell)
+        handle_bench(
+            &format,
+            cli.no_version,
+            cli.code,
+            cli.no_color,
+            shell,
+            stdin_data,
+        )
     } else {
         handle_format(
             &format,
@@ -202,6 +243,7 @@ fn main() -> ExitCode {
             cli.code,
             cli.no_color,
             shell,
+            stdin_data,
         )
     };
 
@@ -217,6 +259,12 @@ fn main() -> ExitCode {
     }
 }
 
+fn read_stdin_json() -> Option<Arc<serde_json::Value>> {
+    let mut buf = String::new();
+    std::io::stdin().read_to_string(&mut buf).ok()?;
+    serde_json::from_str(&buf).ok().map(Arc::new)
+}
+
 fn handle_format(
     format: &str,
     no_version: bool,
@@ -224,10 +272,13 @@ fn handle_format(
     exit_code: Option<i32>,
     no_color: bool,
     shell: style::Shell,
+    stdin_data: Option<Arc<serde_json::Value>>,
 ) -> error::Result<String> {
     if debug {
         let start = Instant::now();
-        let output = executor::execute_with_shell(format, no_version, exit_code, no_color, shell)?;
+        let output = executor::execute_with_shell(
+            format, no_version, exit_code, no_color, shell, stdin_data,
+        )?;
         let elapsed = start.elapsed();
 
         eprintln!("Format: {}", format);
@@ -235,7 +286,7 @@ fn handle_format(
 
         Ok(output)
     } else {
-        executor::execute_with_shell(format, no_version, exit_code, no_color, shell)
+        executor::execute_with_shell(format, no_version, exit_code, no_color, shell, stdin_data)
     }
 }
 
@@ -245,12 +296,20 @@ fn handle_bench(
     exit_code: Option<i32>,
     no_color: bool,
     shell: style::Shell,
+    stdin_data: Option<Arc<serde_json::Value>>,
 ) -> error::Result<String> {
     let mut times = Vec::new();
 
     for _ in 0..100 {
         let start = Instant::now();
-        let _ = executor::execute_with_shell(format, no_version, exit_code, no_color, shell)?;
+        let _ = executor::execute_with_shell(
+            format,
+            no_version,
+            exit_code,
+            no_color,
+            shell,
+            stdin_data.clone(),
+        )?;
         times.push(start.elapsed());
     }
 
@@ -267,4 +326,69 @@ fn handle_bench(
         max.as_secs_f64() * 1000.0,
         p99.as_secs_f64() * 1000.0
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_shell_prefers_cli_over_other_sources() {
+        let resolved = resolve_shell_from_sources(
+            Some(style::Shell::Bash),
+            Some(style::Shell::Zsh),
+            Some(style::Shell::None),
+        );
+
+        assert_eq!(resolved, style::Shell::Bash);
+    }
+
+    #[test]
+    fn resolve_shell_prefers_parent_process_over_env() {
+        let resolved =
+            resolve_shell_from_sources(None, Some(style::Shell::Bash), Some(style::Shell::Zsh));
+
+        assert_eq!(resolved, style::Shell::Bash);
+    }
+
+    #[test]
+    fn resolve_shell_falls_back_to_env_when_parent_missing() {
+        let resolved = resolve_shell_from_sources(None, None, Some(style::Shell::Zsh));
+
+        assert_eq!(resolved, style::Shell::Zsh);
+    }
+
+    #[test]
+    fn resolve_shell_defaults_to_none_when_no_source_matches() {
+        let resolved = resolve_shell_from_sources(None, None, None);
+
+        assert_eq!(resolved, style::Shell::None);
+    }
+
+    #[test]
+    fn parse_args_accepts_single_positional_format() {
+        let cli = parse_args_from(["prmt", "{path}"]).expect("parse args");
+
+        assert_eq!(cli.format.as_deref(), Some("{path}"));
+    }
+
+    #[test]
+    fn parse_args_rejects_multiple_positional_formats() {
+        let err = match parse_args_from(["prmt", "{path}", "{git}"]) {
+            Ok(_) => panic!("expected error"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.to_string(), "unexpected argument \"{git}\"");
+    }
+
+    #[test]
+    fn parse_args_rejects_positional_when_flag_format_is_present() {
+        let err = match parse_args_from(["prmt", "--format", "{path}", "{git}"]) {
+            Ok(_) => panic!("expected error"),
+            Err(err) => err,
+        };
+
+        assert_eq!(err.to_string(), "unexpected argument \"{git}\"");
+    }
 }
